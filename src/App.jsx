@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  supabase,
   upsertWorkflows,
   loadWorkflows,
   upsertExecutions,
@@ -12,11 +11,12 @@ import {
 
 const N8N_BASE = "/api/v1";
 const N8N_DISPLAY_URL = "n8n.developern8n.org";
+const N8N_API_KEY = import.meta.env.VITE_N8N_API_KEY;
 
 // ── n8n API fetch ──────────────────────────────────────────────────────
-async function n8nFetch(path, apiKey) {
+async function n8nFetch(path) {
   const res = await fetch(`${N8N_BASE}${path}`, {
-    headers: { "X-N8N-API-KEY": apiKey, Accept: "application/json" },
+    headers: { "X-N8N-API-KEY": N8N_API_KEY, Accept: "application/json" },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -523,10 +523,7 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
 export default function App() {
   const isMobile = useIsMobile();
 
-  const [apiKey, setApiKey] = useState("");
-  const [apiKeyInput, setApiKeyInput] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [initialLoading, setInitialLoading] = useState(true);
   const [error, setError] = useState("");
 
   const [executions, setExecutions] = useState([]);
@@ -543,15 +540,9 @@ export default function App() {
 
   const syncTimer = useRef(null);
 
-  // ── Load from Supabase on mount ──
+  // ── Load from Supabase on mount + first sync ──
   useEffect(() => {
     (async () => {
-      const storedKey = localStorage.getItem("n8n:apikey");
-      if (storedKey) {
-        setApiKey(storedKey);
-        setApiKeyInput(storedKey);
-      }
-
       try {
         const [wfs, execs, cnts] = await Promise.all([
           loadWorkflows(),
@@ -561,16 +552,18 @@ export default function App() {
         setWorkflows(wfs);
         setExecutions(execs);
         setCounts(cnts);
-        if (storedKey && cnts.total > 0) setConnected(true);
       } catch (e) {
         console.error("Load from Supabase failed:", e);
+      } finally {
+        setInitialLoading(false);
       }
+      // Auto-sync on first load
+      fetchAll();
     })();
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Reload filtered data when filters change ──
   useEffect(() => {
-    if (!connected) return;
     (async () => {
       const execs = await loadExecutions({
         status: filterStatus,
@@ -579,15 +572,15 @@ export default function App() {
       });
       setExecutions(execs);
     })();
-  }, [filterStatus, filterWorkflow, connected]);
+  }, [filterStatus, filterWorkflow]);
 
   const fetchAll = useCallback(
-    async (key) => {
+    async () => {
       setSyncing(true);
       setError("");
       try {
         // Fetch workflows from n8n
-        const wfRes = await n8nFetch("/workflows?limit=250", key);
+        const wfRes = await n8nFetch("/workflows?limit=250");
         const wfMap = {};
         (wfRes.data || []).forEach((w) => (wfMap[w.id] = w.name));
 
@@ -596,7 +589,7 @@ export default function App() {
         const allNew = [];
         for (const st of statuses) {
           try {
-            const res = await n8nFetch(`/executions?status=${st}&limit=100`, key);
+            const res = await n8nFetch(`/executions?status=${st}&limit=100`);
             allNew.push(...(res.data || []));
           } catch {}
         }
@@ -644,7 +637,7 @@ export default function App() {
         }
 
         // Fetch from n8n API
-        const detail = await n8nFetch(`/executions/${execId}?includeData=true`, apiKey);
+        const detail = await n8nFetch(`/executions/${execId}?includeData=true`);
         setExecDetails((prev) => ({ ...prev, [execId]: detail }));
 
         // Save to Supabase for future
@@ -656,37 +649,14 @@ export default function App() {
         setLoadingDetail(null);
       }
     },
-    [expandedExec, execDetails, apiKey]
+    [expandedExec, execDetails]
   );
-
-  const connect = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      await n8nFetch("/workflows?limit=1", apiKeyInput);
-      setApiKey(apiKeyInput);
-      localStorage.setItem("n8n:apikey", apiKeyInput);
-      setConnected(true);
-      await fetchAll(apiKeyInput);
-    } catch {
-      setError("Não foi possível conectar. Verifique a API Key.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const disconnect = () => {
-    setConnected(false);
-    setApiKey("");
-    localStorage.removeItem("n8n:apikey");
-  };
 
   // Auto-sync every 2 minutes
   useEffect(() => {
-    if (!connected || !apiKey) return;
-    syncTimer.current = setInterval(() => fetchAll(apiKey), 120_000);
+    syncTimer.current = setInterval(() => fetchAll(), 120_000);
     return () => clearInterval(syncTimer.current);
-  }, [connected, apiKey, fetchAll]);
+  }, [fetchAll]);
 
   // ── Derived stats ──
   const errorRate = counts.total ? ((counts.errors / counts.total) * 100).toFixed(1) : "0";
@@ -702,8 +672,8 @@ export default function App() {
 
   const wfList = Object.entries(workflows);
 
-  // ── LOGIN SCREEN ──
-  if (!connected) {
+  // ── LOADING SCREEN ──
+  if (initialLoading) {
     return (
       <div
         style={{
@@ -712,71 +682,14 @@ export default function App() {
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          padding: 16,
           fontFamily: "'Inter', sans-serif",
-          backgroundImage:
-            "radial-gradient(ellipse at 30% 20%, rgba(0,232,135,0.04) 0%, transparent 60%), radial-gradient(ellipse at 80% 80%, rgba(61,157,255,0.04) 0%, transparent 60%)",
         }}
       >
-        <div
-          style={{
-            width: "100%",
-            maxWidth: 420,
-            background: T.surface,
-            border: `1px solid ${T.border}`,
-            borderRadius: 16,
-            padding: isMobile ? 24 : 40,
-          }}
-        >
-          <div
-            style={{
-              fontSize: isMobile ? 22 : 28,
-              fontWeight: 800,
-              color: T.white,
-              marginBottom: 4,
-              letterSpacing: "-0.5px",
-            }}
-          >
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 28, fontWeight: 800, color: T.white, marginBottom: 8, letterSpacing: "-0.5px" }}>
             n8n<span style={{ color: T.green }}>Monitor</span>
           </div>
-          <div style={{ fontSize: 11, color: T.muted, marginBottom: 28, letterSpacing: "0.3px" }}>
-            Histórico permanente · Falhas em destaque · Filtros avançados
-          </div>
-
-          <label style={labelStyle}>Instância</label>
-          <div
-            style={{
-              background: T.blueDim,
-              border: `1px solid ${T.border}`,
-              borderRadius: 8,
-              padding: "10px 14px",
-              fontSize: 12,
-              color: T.blue,
-              marginBottom: 20,
-              fontFamily: "'JetBrains Mono', monospace",
-            }}
-          >
-            {N8N_DISPLAY_URL}
-          </div>
-
-          <label style={labelStyle}>API Key</label>
-          <input
-            type="password"
-            value={apiKeyInput}
-            onChange={(e) => setApiKeyInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && connect()}
-            placeholder="Cole sua X-N8N-API-KEY aqui"
-            style={inputStyle}
-          />
-          <div style={{ fontSize: 10, color: T.muted, marginBottom: 24 }}>
-            Gere em: Settings → API → Create API Key
-          </div>
-
-          {error && <div style={errorBoxStyle}>{error}</div>}
-
-          <button onClick={connect} disabled={loading || !apiKeyInput} style={btnPrimaryStyle(loading)}>
-            {loading ? "CONECTANDO..." : "CONECTAR"}
-          </button>
+          <div style={{ fontSize: 12, color: T.muted }}>Carregando dados...</div>
         </div>
       </div>
     );
@@ -823,7 +736,7 @@ export default function App() {
             </div>
           )}
           <button
-            onClick={() => fetchAll(apiKey)}
+            onClick={() => fetchAll()}
             disabled={syncing}
             style={{
               background: syncing ? T.border : T.greenDim,
@@ -840,9 +753,6 @@ export default function App() {
             }}
           >
             {syncing ? "SYNC..." : "↻ SYNC"}
-          </button>
-          <button onClick={disconnect} style={btnOutlineStyle}>
-            SAIR
           </button>
         </div>
       </div>
@@ -1158,29 +1068,6 @@ export default function App() {
 
 // ── Shared Styles ──────────────────────────────────────────────────────
 
-const labelStyle = {
-  display: "block",
-  fontSize: 10,
-  color: T.muted,
-  letterSpacing: "1.5px",
-  textTransform: "uppercase",
-  marginBottom: 8,
-};
-
-const inputStyle = {
-  width: "100%",
-  background: T.bg,
-  border: `1px solid ${T.border}`,
-  borderRadius: 8,
-  padding: "12px 14px",
-  fontSize: 13,
-  color: T.white,
-  outline: "none",
-  fontFamily: "'Inter', sans-serif",
-  marginBottom: 8,
-  transition: "border-color 0.15s",
-};
-
 const errorBoxStyle = {
   background: "rgba(255,61,90,0.08)",
   border: `1px solid ${T.red}`,
@@ -1189,32 +1076,4 @@ const errorBoxStyle = {
   fontSize: 11,
   color: T.red,
   marginBottom: 16,
-};
-
-const btnPrimaryStyle = (loading) => ({
-  width: "100%",
-  background: loading ? T.muted : T.green,
-  color: T.bg,
-  border: "none",
-  borderRadius: 8,
-  padding: "13px",
-  fontSize: 13,
-  fontWeight: 700,
-  cursor: loading ? "not-allowed" : "pointer",
-  fontFamily: "'Inter', sans-serif",
-  letterSpacing: "0.5px",
-  transition: "background 0.2s",
-});
-
-const btnOutlineStyle = {
-  background: "transparent",
-  color: T.muted,
-  border: `1px solid ${T.border}`,
-  borderRadius: 8,
-  padding: "7px 14px",
-  fontSize: 11,
-  fontWeight: 600,
-  cursor: "pointer",
-  fontFamily: "'Inter', sans-serif",
-  transition: "all 0.15s",
 };
