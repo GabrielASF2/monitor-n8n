@@ -7,6 +7,7 @@ import {
   countExecutions,
   saveExecutionDetail,
   loadExecutionDetail,
+  getExecutionsMissingDetails,
 } from "./lib/supabase.js";
 
 const N8N_BASE = "/api/v1";
@@ -181,7 +182,7 @@ function MiniChart({ data, color }) {
 }
 
 function ExecRow({ exec, workflows, expanded, onToggle, detail, loadingDetail, isMobile }) {
-  const wfName = workflows[exec.workflowId] || exec.workflowId;
+  const wfName = workflows[exec.workflowId]?.name || exec.workflowId;
   const started = exec.startedAt ? new Date(exec.startedAt) : null;
   const ended = exec.stoppedAt ? new Date(exec.stoppedAt) : null;
   const dur = started && ended ? Math.round((ended - started) / 1000) : null;
@@ -342,7 +343,70 @@ function ExecRow({ exec, workflows, expanded, onToggle, detail, loadingDetail, i
   );
 }
 
+function NodeDataViewer({ data, isMobile }) {
+  if (!data || data.length === 0) {
+    return (
+      <div style={{ fontSize: 11, color: T.muted, padding: "8px 0" }}>
+        Sem dados de saída para este nó.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 400, overflowY: "auto" }}>
+      {data.map((item, idx) => (
+        <div
+          key={idx}
+          style={{
+            background: "rgba(0,0,0,0.3)",
+            border: `1px solid ${T.border}`,
+            borderRadius: 6,
+            padding: "10px 12px",
+          }}
+        >
+          <div style={{ fontSize: 9, color: T.muted, marginBottom: 6, fontWeight: 700 }}>
+            ITEM {idx + 1}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            {Object.entries(item).map(([key, val]) => (
+              <div key={key} style={{ display: "flex", gap: 8, fontSize: 11, lineHeight: 1.5 }}>
+                <span style={{
+                  color: T.blue,
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 10,
+                  minWidth: isMobile ? 80 : 120,
+                  flexShrink: 0,
+                  fontWeight: 600,
+                }}>
+                  {key}
+                </span>
+                <span style={{
+                  color: T.white,
+                  wordBreak: "break-word",
+                  fontFamily: "'JetBrains Mono', monospace",
+                  fontSize: 10,
+                }}>
+                  {typeof val === "object" && val !== null
+                    ? JSON.stringify(val, null, 2)
+                    : String(val ?? "null")}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+      {data.length >= 50 && (
+        <div style={{ fontSize: 10, color: T.yellow, textAlign: "center", padding: 4 }}>
+          Mostrando até 50 items (limite de armazenamento)
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
+  const [expandedNode, setExpandedNode] = useState(null);
+
   return (
     <div
       style={{
@@ -361,7 +425,6 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
 
       {!loadingDetail && detail && (
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {/* Info geral */}
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11 }}>
             <div>
               <span style={{ color: T.muted }}>Modo: </span>
@@ -373,7 +436,6 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
             </div>
           </div>
 
-          {/* Erro principal */}
           {errorInfo?.topError && (
             <div
               style={{
@@ -414,7 +476,6 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
             </div>
           )}
 
-          {/* Nós que falharam */}
           {errorInfo?.failedNodes?.length > 0 && (
             <div>
               <div
@@ -462,7 +523,6 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
             </div>
           )}
 
-          {/* Pipeline */}
           {errorInfo?.runData && (
             <div>
               <div
@@ -474,12 +534,16 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
                   marginBottom: 6,
                 }}
               >
-                PIPELINE
+                PIPELINE{" "}
+                <span style={{ fontSize: 8, color: T.text, letterSpacing: 0, textTransform: "none" }}>
+                  (clique para ver dados)
+                </span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
                 {Object.entries(errorInfo.runData).map(([nodeName, runs]) => {
                   const runsArr = Array.isArray(runs) ? runs : [runs];
                   const hasError = runsArr.some((r) => r.error);
+                  const hasData = runsArr.some((r) => r.outputData && r.outputData.length > 0);
                   const itemCount = runsArr.reduce((acc, r) => {
                     if (r.itemCount !== undefined) return acc + r.itemCount;
                     const main = r.data?.main;
@@ -488,29 +552,107 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
                     }
                     return acc;
                   }, 0);
+                  const isExpanded = expandedNode === nodeName;
                   return (
                     <div
                       key={nodeName}
+                      onClick={() => hasData && setExpandedNode(isExpanded ? null : nodeName)}
                       style={{
                         fontSize: 10,
                         padding: "4px 10px",
                         borderRadius: 4,
-                        background: hasError ? T.redDim : T.greenDim,
-                        color: hasError ? T.red : T.green,
-                        border: `1px solid ${hasError ? "rgba(255,61,90,0.18)" : "rgba(0,232,135,0.15)"}`,
+                        background: isExpanded
+                          ? T.blueDim
+                          : hasError
+                            ? T.redDim
+                            : T.greenDim,
+                        color: isExpanded
+                          ? T.blue
+                          : hasError
+                            ? T.red
+                            : T.green,
+                        border: `1px solid ${
+                          isExpanded
+                            ? "rgba(61,157,255,0.3)"
+                            : hasError
+                              ? "rgba(255,61,90,0.18)"
+                              : "rgba(0,232,135,0.15)"
+                        }`,
                         display: "flex",
                         alignItems: "center",
                         gap: 5,
+                        cursor: hasData ? "pointer" : "default",
+                        transition: "all 0.15s",
+                        opacity: hasData ? 1 : 0.7,
                       }}
                     >
                       <span>{nodeName}</span>
                       {itemCount > 0 && (
                         <span style={{ fontSize: 9, color: T.muted }}>({itemCount})</span>
                       )}
+                      {hasData && (
+                        <span style={{ fontSize: 8, opacity: 0.6 }}>
+                          {isExpanded ? "▼" : "▶"}
+                        </span>
+                      )}
                     </div>
                   );
                 })}
               </div>
+
+              {expandedNode && errorInfo.runData[expandedNode] && (
+                <div style={{
+                  marginTop: 10,
+                  background: "rgba(0,0,0,0.2)",
+                  border: `1px solid ${T.border}`,
+                  borderRadius: 8,
+                  padding: isMobile ? 10 : 14,
+                }}>
+                  <div style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    marginBottom: 10,
+                  }}>
+                    <div style={{
+                      fontSize: 10,
+                      color: T.blue,
+                      fontWeight: 700,
+                      letterSpacing: "1px",
+                      textTransform: "uppercase",
+                    }}>
+                      {expandedNode} — Dados de saída
+                    </div>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); setExpandedNode(null); }}
+                      style={{
+                        background: "transparent",
+                        border: `1px solid ${T.border}`,
+                        borderRadius: 4,
+                        color: T.muted,
+                        fontSize: 9,
+                        padding: "2px 8px",
+                        cursor: "pointer",
+                        fontFamily: "'Inter', sans-serif",
+                      }}
+                    >
+                      ✕ Fechar
+                    </button>
+                  </div>
+                  <NodeDataViewer
+                    data={(() => {
+                      const runs = errorInfo.runData[expandedNode];
+                      const runsArr = Array.isArray(runs) ? runs : [runs];
+                      const allData = [];
+                      for (const run of runsArr) {
+                        if (run.outputData) allData.push(...run.outputData);
+                      }
+                      return allData;
+                    })()}
+                    isMobile={isMobile}
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -531,23 +673,32 @@ export default function App() {
   const [counts, setCounts] = useState({ total: 0, errors: 0, success: 0 });
   const [filterStatus, setFilterStatus] = useState("all");
   const [filterWorkflow, setFilterWorkflow] = useState("all");
+  const [filterScope, setFilterScope] = useState("active");
   const [lastSync, setLastSync] = useState(null);
   const [syncing, setSyncing] = useState(false);
 
   const [expandedExec, setExpandedExec] = useState(null);
   const [execDetails, setExecDetails] = useState({});
   const [loadingDetail, setLoadingDetail] = useState(null);
+  const [detailSyncProgress, setDetailSyncProgress] = useState(null);
 
   const syncTimer = useRef(null);
+
+  const scopedWfIds = Object.entries(workflows)
+    .filter(([, w]) => filterScope === "active" ? w.active : !w.active)
+    .map(([id]) => id);
+
+  const deactivatedCount = Object.values(workflows).filter((w) => !w.active).length;
 
   // ── Load from Supabase on mount + first sync ──
   useEffect(() => {
     (async () => {
       try {
-        const [wfs, execs, cnts] = await Promise.all([
-          loadWorkflows(),
-          loadExecutions({ limit: 500 }),
-          countExecutions(),
+        const wfs = await loadWorkflows();
+        const activeIds = Object.entries(wfs).filter(([, w]) => w.active).map(([id]) => id);
+        const [execs, cnts] = await Promise.all([
+          loadExecutions({ workflowIds: activeIds, limit: 500 }),
+          countExecutions({ workflowIds: activeIds }),
         ]);
         setWorkflows(wfs);
         setExecutions(execs);
@@ -557,34 +708,48 @@ export default function App() {
       } finally {
         setInitialLoading(false);
       }
-      // Auto-sync on first load
       fetchAll();
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Reload filtered data when filters change ──
+  // ── Reload filtered data when filters or scope change ──
   useEffect(() => {
+    if (Object.keys(workflows).length === 0) return;
     (async () => {
-      const execs = await loadExecutions({
-        status: filterStatus,
-        workflowId: filterWorkflow,
-        limit: 500,
-      });
+      const ids = scopedWfIds;
+      if (ids.length === 0) {
+        setExecutions([]);
+        setCounts({ total: 0, errors: 0, success: 0 });
+        return;
+      }
+      const [execs, cnts] = await Promise.all([
+        loadExecutions({
+          status: filterStatus,
+          workflowId: filterWorkflow,
+          workflowIds: filterWorkflow !== "all" ? undefined : ids,
+          limit: 500,
+        }),
+        countExecutions({ workflowIds: ids }),
+      ]);
       setExecutions(execs);
+      setCounts(cnts);
     })();
-  }, [filterStatus, filterWorkflow]);
+  }, [filterStatus, filterWorkflow, filterScope, workflows]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const DETAIL_BATCH_SIZE = 5;
 
   const fetchAll = useCallback(
     async () => {
       setSyncing(true);
       setError("");
       try {
-        // Fetch workflows from n8n
         const wfRes = await n8nFetch("/workflows?limit=250");
-        const wfMap = {};
-        (wfRes.data || []).forEach((w) => (wfMap[w.id] = w.name));
+        const wfList = (wfRes.data || []).map((w) => ({
+          id: String(w.id),
+          name: w.name,
+          active: w.active !== false,
+        }));
 
-        // Fetch executions from n8n
         const statuses = ["error", "success", "waiting", "canceled"];
         const allNew = [];
         for (const st of statuses) {
@@ -594,27 +759,66 @@ export default function App() {
           } catch {}
         }
 
-        // Save to Supabase
-        await Promise.all([upsertWorkflows(wfMap), upsertExecutions(allNew)]);
+        await Promise.all([upsertWorkflows(wfList), upsertExecutions(allNew)]);
 
-        // Reload from Supabase
-        const [freshWfs, freshExecs, freshCnts] = await Promise.all([
-          loadWorkflows(),
-          loadExecutions({ status: filterStatus, workflowId: filterWorkflow, limit: 500 }),
-          countExecutions(),
+        const freshWfs = await loadWorkflows();
+        const ids = Object.entries(freshWfs)
+          .filter(([, w]) => filterScope === "active" ? w.active : !w.active)
+          .map(([id]) => id);
+
+        const [freshExecs, freshCnts] = await Promise.all([
+          loadExecutions({
+            status: filterStatus,
+            workflowId: filterWorkflow,
+            workflowIds: filterWorkflow !== "all" ? undefined : ids,
+            limit: 500,
+          }),
+          countExecutions({ workflowIds: ids }),
         ]);
 
         setWorkflows(freshWfs);
         setExecutions(freshExecs);
         setCounts(freshCnts);
         setLastSync(new Date());
+
+        // Auto-fetch ALL missing details from Supabase
+        const missingIds = await getExecutionsMissingDetails(500);
+
+        if (missingIds.length > 0) {
+          setDetailSyncProgress({ current: 0, total: missingIds.length });
+          let fetched = 0;
+
+          for (let i = 0; i < missingIds.length; i += DETAIL_BATCH_SIZE) {
+            const batch = missingIds.slice(i, i + DETAIL_BATCH_SIZE);
+            const results = await Promise.allSettled(
+              batch.map((id) => n8nFetch(`/executions/${id}?includeData=true`))
+            );
+
+            for (let j = 0; j < results.length; j++) {
+              if (results[j].status === "fulfilled") {
+                const detail = results[j].value;
+                await saveExecutionDetail(batch[j], detail);
+                setExecDetails((prev) => ({ ...prev, [batch[j]]: { ...detail, _fromApi: true } }));
+              } else {
+                // n8n doesn't have this execution anymore — save empty detail to avoid retrying
+                await saveExecutionDetail(batch[j], { data: { resultData: null } });
+              }
+            }
+
+            fetched += batch.length;
+            setDetailSyncProgress({ current: fetched, total: missingIds.length });
+          }
+
+          setDetailSyncProgress(null);
+        }
       } catch (e) {
         setError("Erro ao sincronizar: " + e.message);
       } finally {
         setSyncing(false);
+        setDetailSyncProgress(null);
       }
     },
-    [filterStatus, filterWorkflow]
+    [filterStatus, filterWorkflow, filterScope]
   );
 
   const toggleExecDetail = useCallback(
@@ -670,7 +874,9 @@ export default function App() {
     return errExecs.filter((e) => e.startedAt?.startsWith(key)).length;
   });
 
-  const wfList = Object.entries(workflows);
+  const wfList = Object.entries(workflows)
+    .filter(([, w]) => filterScope === "active" ? w.active : !w.active);
+  const activeWfCount = Object.values(workflows).filter((w) => w.active).length;
 
   // ── LOADING SCREEN ──
   if (initialLoading) {
@@ -752,7 +958,11 @@ export default function App() {
               transition: "all 0.15s",
             }}
           >
-            {syncing ? "SYNC..." : "↻ SYNC"}
+            {syncing
+              ? detailSyncProgress
+                ? `DETALHES ${detailSyncProgress.current}/${detailSyncProgress.total}`
+                : "SYNC..."
+              : "↻ SYNC"}
           </button>
         </div>
       </div>
@@ -794,8 +1004,8 @@ export default function App() {
         />
         <StatCard
           label="Workflows"
-          value={wfList.length}
-          sub="monitorados"
+          value={activeWfCount}
+          sub={deactivatedCount > 0 ? `${deactivatedCount} despublicado${deactivatedCount !== 1 ? "s" : ""}` : "publicados"}
           accent={T.yellow}
           color={T.yellow}
           isMobile={isMobile}
@@ -891,9 +1101,9 @@ export default function App() {
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
                   }}
-                  title={workflows[id]}
+                  title={workflows[id]?.name}
                 >
-                  {workflows[id] || id}
+                  {workflows[id]?.name || id}
                 </div>
                 <div
                   style={{
@@ -923,6 +1133,58 @@ export default function App() {
           padding: isMobile ? 12 : 20,
         }}
       >
+        {/* Scope selector */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {[
+            { key: "active", label: "Publicados", color: T.green },
+            { key: "deactivated", label: `Despublicados — Auditoria${deactivatedCount > 0 ? ` (${deactivatedCount})` : ""}`, color: T.yellow },
+          ].map(({ key, label, color }) => (
+            <button
+              key={key}
+              onClick={() => { setFilterScope(key); setFilterWorkflow("all"); }}
+              style={{
+                background: filterScope === key ? color : "transparent",
+                color: filterScope === key ? T.bg : T.muted,
+                border: `1px solid ${filterScope === key ? "transparent" : T.border}`,
+                borderRadius: 6,
+                padding: isMobile ? "5px 10px" : "6px 14px",
+                fontSize: isMobile ? 9 : 10,
+                cursor: "pointer",
+                fontFamily: "'Inter', sans-serif",
+                letterSpacing: "0.5px",
+                fontWeight: 700,
+                transition: "all 0.15s",
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {filterScope === "deactivated" && deactivatedCount > 0 && (
+          <div style={{
+            background: T.yellowDim,
+            border: "1px solid rgba(255,204,0,0.2)",
+            borderRadius: 8,
+            padding: "8px 12px",
+            marginBottom: 12,
+            fontSize: 10,
+            color: T.yellow,
+            lineHeight: 1.5,
+          }}>
+            Workflows despublicados ficam disponíveis por 60 dias para auditoria.
+            {(() => {
+              const oldest = Object.values(workflows)
+                .filter((w) => !w.active && w.deactivatedAt)
+                .map((w) => new Date(w.deactivatedAt))
+                .sort((a, b) => a - b)[0];
+              if (!oldest) return null;
+              const daysLeft = Math.max(0, 60 - Math.floor((Date.now() - oldest) / 86400000));
+              return ` Próxima expiração em ${daysLeft} dia${daysLeft !== 1 ? "s" : ""}.`;
+            })()}
+          </div>
+        )}
+
         <div
           style={{
             display: "flex",
@@ -993,10 +1255,10 @@ export default function App() {
               maxWidth: isMobile ? "100%" : 220,
             }}
           >
-            <option value="all">Todos os workflows</option>
-            {wfList.map(([id, name]) => (
+            <option value="all">{filterScope === "active" ? "Todos os publicados" : "Todos os despublicados"}</option>
+            {wfList.map(([id, w]) => (
               <option key={id} value={id}>
-                {name}
+                {w.name}
               </option>
             ))}
           </select>

@@ -7,13 +7,38 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // ── Workflows ──────────────────────────────────────────────────────────
 
-export async function upsertWorkflows(wfMap) {
-  const rows = Object.entries(wfMap).map(([id, name]) => ({
-    id,
-    name,
-    updated_at: new Date().toISOString(),
-  }));
-  if (rows.length === 0) return;
+const AUDIT_RETENTION_DAYS = 60;
+
+export async function upsertWorkflows(wfList) {
+  if (wfList.length === 0) return;
+
+  const { data: existing } = await supabase
+    .from("workflows")
+    .select("id, active, deactivated_at");
+
+  const existingMap = {};
+  (existing || []).forEach((w) => (existingMap[w.id] = w));
+
+  const rows = wfList.map((w) => {
+    const prev = existingMap[w.id];
+    const wasActive = prev ? prev.active !== false : true;
+    const isNowActive = w.active !== false;
+
+    let deactivated_at = prev?.deactivated_at || null;
+    if (wasActive && !isNowActive) {
+      deactivated_at = new Date().toISOString();
+    } else if (isNowActive) {
+      deactivated_at = null;
+    }
+
+    return {
+      id: w.id,
+      name: w.name,
+      active: isNowActive,
+      deactivated_at,
+      updated_at: new Date().toISOString(),
+    };
+  });
 
   const { error } = await supabase
     .from("workflows")
@@ -25,15 +50,27 @@ export async function upsertWorkflows(wfMap) {
 export async function loadWorkflows() {
   const { data, error } = await supabase
     .from("workflows")
-    .select("id, name")
+    .select("id, name, active, deactivated_at")
     .order("name");
 
   if (error) {
     console.error("loadWorkflows error:", error);
     return {};
   }
+
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - AUDIT_RETENTION_DAYS);
+
   const map = {};
-  (data || []).forEach((w) => (map[w.id] = w.name));
+  (data || []).forEach((w) => {
+    const isActive = w.active !== false;
+    if (!isActive && w.deactivated_at && new Date(w.deactivated_at) < cutoff) return;
+    map[w.id] = {
+      name: w.name,
+      active: isActive,
+      deactivatedAt: w.deactivated_at,
+    };
+  });
   return map;
 }
 
@@ -61,7 +98,7 @@ export async function upsertExecutions(executions) {
   }
 }
 
-export async function loadExecutions({ status, workflowId, limit = 500 } = {}) {
+export async function loadExecutions({ status, workflowId, workflowIds, limit = 500 } = {}) {
   let query = supabase
     .from("executions")
     .select("id, workflow_id, status, started_at, stopped_at, mode")
@@ -74,6 +111,9 @@ export async function loadExecutions({ status, workflowId, limit = 500 } = {}) {
   if (workflowId && workflowId !== "all") {
     query = query.eq("workflow_id", workflowId);
   }
+  if (workflowIds && workflowIds.length > 0) {
+    query = query.in("workflow_id", workflowIds);
+  }
 
   const { data, error } = await query;
   if (error) {
@@ -81,7 +121,6 @@ export async function loadExecutions({ status, workflowId, limit = 500 } = {}) {
     return [];
   }
 
-  // Map back to the format the app expects
   return (data || []).map((e) => ({
     id: e.id,
     workflowId: e.workflow_id,
@@ -92,20 +131,20 @@ export async function loadExecutions({ status, workflowId, limit = 500 } = {}) {
   }));
 }
 
-export async function countExecutions() {
-  const { count: total } = await supabase
-    .from("executions")
-    .select("*", { count: "exact", head: true });
+export async function countExecutions({ workflowIds } = {}) {
+  let totalQ = supabase.from("executions").select("*", { count: "exact", head: true });
+  let errQ = supabase.from("executions").select("*", { count: "exact", head: true }).eq("status", "error");
+  let successQ = supabase.from("executions").select("*", { count: "exact", head: true }).eq("status", "success");
 
-  const { count: errors } = await supabase
-    .from("executions")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "error");
+  if (workflowIds && workflowIds.length > 0) {
+    totalQ = totalQ.in("workflow_id", workflowIds);
+    errQ = errQ.in("workflow_id", workflowIds);
+    successQ = successQ.in("workflow_id", workflowIds);
+  }
 
-  const { count: success } = await supabase
-    .from("executions")
-    .select("*", { count: "exact", head: true })
-    .eq("status", "success");
+  const [{ count: total }, { count: errors }, { count: success }] = await Promise.all([
+    totalQ, errQ, successQ,
+  ]);
 
   return {
     total: total || 0,
@@ -141,7 +180,7 @@ export async function saveExecutionDetail(executionId, detail) {
     error_description: topError?.description || null,
     error_node: topError?.node?.name || topError?.node || null,
     failed_nodes: failedNodes,
-    run_data: result?.runData ? summarizeRunData(result.runData) : null,
+    run_data: result?.runData ? preserveRunData(result.runData) : null,
     fetched_at: new Date().toISOString(),
   };
 
@@ -163,20 +202,88 @@ export async function loadExecutionDetail(executionId) {
   return data;
 }
 
-// Summarize runData to save space (strip large payloads, keep structure)
-function summarizeRunData(runData) {
-  const summary = {};
-  for (const [nodeName, nodeRuns] of Object.entries(runData)) {
-    summary[nodeName] = nodeRuns.map((run) => ({
-      startTime: run.startTime,
-      executionTime: run.executionTime,
-      error: run.error
-        ? { name: run.error.name, message: run.error.message, description: run.error.description }
-        : null,
-      itemCount: run.data?.main
-        ? run.data.main.reduce((acc, out) => acc + (out?.length || 0), 0)
-        : 0,
-    }));
+export async function getExistingDetailIds(executionIds) {
+  if (executionIds.length === 0) return new Set();
+  const { data, error } = await supabase
+    .from("execution_details")
+    .select("execution_id")
+    .in("execution_id", executionIds.map(String));
+
+  if (error) {
+    console.error("getExistingDetailIds error:", error);
+    return new Set();
   }
-  return summary;
+  return new Set((data || []).map((r) => r.execution_id));
+}
+
+export async function getExecutionsMissingDetails(limit = 200) {
+  const { data, error } = await supabase.rpc("get_executions_missing_details", { row_limit: limit });
+
+  if (!error && data) {
+    return data.map((r) => r.id);
+  }
+
+  // Fallback: manual left join via two queries
+  const { data: allExecs } = await supabase
+    .from("executions")
+    .select("id")
+    .order("started_at", { ascending: false })
+    .limit(limit * 2);
+
+  if (!allExecs || allExecs.length === 0) return [];
+
+  const allIds = allExecs.map((e) => e.id);
+  const existing = await getExistingDetailIds(allIds);
+  return allIds.filter((id) => !existing.has(id)).slice(0, limit);
+}
+
+const MAX_ITEMS_PER_NODE = 50;
+const MAX_STRING_LENGTH = 5000;
+
+function truncateValue(val) {
+  if (typeof val === "string" && val.length > MAX_STRING_LENGTH) {
+    return val.slice(0, MAX_STRING_LENGTH) + "… [truncado]";
+  }
+  if (Array.isArray(val)) {
+    return val.slice(0, MAX_ITEMS_PER_NODE).map(truncateValue);
+  }
+  if (val && typeof val === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(val)) {
+      out[k] = truncateValue(v);
+    }
+    return out;
+  }
+  return val;
+}
+
+function preserveRunData(runData) {
+  const preserved = {};
+  for (const [nodeName, nodeRuns] of Object.entries(runData)) {
+    preserved[nodeName] = nodeRuns.map((run) => {
+      const outputItems = [];
+      if (run.data?.main) {
+        for (const output of run.data.main) {
+          if (output) {
+            for (const item of output.slice(0, MAX_ITEMS_PER_NODE)) {
+              outputItems.push(truncateValue(item.json || item));
+            }
+          }
+        }
+      }
+
+      return {
+        startTime: run.startTime,
+        executionTime: run.executionTime,
+        error: run.error
+          ? { name: run.error.name, message: run.error.message, description: run.error.description }
+          : null,
+        itemCount: run.data?.main
+          ? run.data.main.reduce((acc, out) => acc + (out?.length || 0), 0)
+          : 0,
+        outputData: outputItems.length > 0 ? outputItems : null,
+      };
+    });
+  }
+  return preserved;
 }
