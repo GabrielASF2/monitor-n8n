@@ -540,7 +540,15 @@ function DetailPanel({ exec, detail, errorInfo, loadingDetail, isMobile }) {
                 </span>
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                {Object.entries(errorInfo.runData).map(([nodeName, runs]) => {
+                {Object.entries(errorInfo.runData)
+                .sort(([, a], [, b]) => {
+                  const aArr = Array.isArray(a) ? a : [a];
+                  const bArr = Array.isArray(b) ? b : [b];
+                  const aTime = aArr[0]?.startTime || "";
+                  const bTime = bArr[0]?.startTime || "";
+                  return aTime < bTime ? -1 : aTime > bTime ? 1 : 0;
+                })
+                .map(([nodeName, runs]) => {
                   const runsArr = Array.isArray(runs) ? runs : [runs];
                   const hasError = runsArr.some((r) => r.error);
                   const hasData = runsArr.some((r) => r.outputData && r.outputData.length > 0);
